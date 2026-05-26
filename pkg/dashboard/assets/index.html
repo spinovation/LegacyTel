@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LegacyTel - Observability Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="glass-bg-glow"></div>
+    <div class="app-container">
+        <!-- Main Top Navigation -->
+        <header class="main-header glass-card">
+            <div class="brand">
+                <svg class="brand-logo" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2L2 7L12 12L22 7L12 2Z" fill="url(#gradient-logo)"/>
+                    <path d="M2 17L12 22L22 17M2 12L12 17L22 12" stroke="url(#gradient-logo)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <defs>
+                        <linearGradient id="gradient-logo" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+                            <stop stop-color="#00f2fe"/>
+                            <stop offset="1" stop-color="#4facfe"/>
+                        </linearGradient>
+                    </defs>
+                </svg>
+                <div class="brand-text">
+                    <h1>LegacyTel <span class="badge">v1.0.0</span></h1>
+                    <p>Mainframe & Legacy Log Observability Agent</p>
+                </div>
+            </div>
+            <div class="agent-status-panel">
+                <div class="status-item">
+                    <span class="label">Agent ID:</span>
+                    <span class="val" id="agent-id">legacytel-hq-01</span>
+                </div>
+                <div class="status-item">
+                    <span class="label">Uptime:</span>
+                    <span class="val" id="agent-uptime">00:00:00</span>
+                </div>
+                <div class="status-indicator">
+                    <span class="dot pulse"></span>
+                    <span class="status-text">LIVE</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Metrics Dashboard Grid -->
+        <section class="metrics-grid">
+            <!-- Total Logs Gauge -->
+            <div class="glass-card metric-card glow-purple">
+                <div class="metric-header">
+                    <h3>Total Ingested Events</h3>
+                    <span class="icon">📈</span>
+                </div>
+                <div class="metric-body">
+                    <div class="huge-number" id="metric-total-logs">0</div>
+                    <p class="subtext">Logs standardized to OpenTelemetry standard</p>
+                </div>
+            </div>
+
+            <!-- z/OS Mainframe Metrics -->
+            <div class="glass-card platform-card glow-violet" id="card-zos">
+                <div class="platform-header">
+                    <div class="platform-title">
+                        <span class="platform-icon">mainframe</span>
+                        <h4>IBM z/OS (SMF)</h4>
+                    </div>
+                    <span class="pulse-indicator zos-pulse"></span>
+                </div>
+                <div class="platform-body">
+                    <div class="number" id="metric-zos-logs">0</div>
+                    <span class="rate" id="rate-zos">0 eps</span>
+                    <p class="subtext">SMF 30 / 80 / 90 Log Streams</p>
+                </div>
+            </div>
+
+            <!-- IBM i AS/400 Metrics -->
+            <div class="glass-card platform-card glow-blue" id="card-as400">
+                <div class="platform-header">
+                    <div class="platform-title">
+                        <span class="platform-icon">iseries</span>
+                        <h4>IBM i AS/400</h4>
+                    </div>
+                    <span class="pulse-indicator as400-pulse"></span>
+                </div>
+                <div class="platform-body">
+                    <div class="number" id="metric-as400-logs">0</div>
+                    <span class="rate" id="rate-as400">0 eps</span>
+                    <p class="subtext">QAUDJRN Audit Log Entries</p>
+                </div>
+            </div>
+
+            <!-- Tandem NonStop Metrics -->
+            <div class="glass-card platform-card glow-teal" id="card-ems">
+                <div class="platform-header">
+                    <div class="platform-title">
+                        <span class="platform-icon">nonstop</span>
+                        <h4>HPE NonStop</h4>
+                    </div>
+                    <span class="pulse-indicator ems-pulse"></span>
+                </div>
+                <div class="platform-body">
+                    <div class="number" id="metric-ems-logs">0</div>
+                    <span class="rate" id="rate-ems">0 eps</span>
+                    <p class="subtext">EMS System Event Subsystems</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="performance-grid">
+            <!-- Systems Health -->
+            <div class="glass-card health-card">
+                <h3>Agent Resource Telemetry</h3>
+                <div class="health-gauges">
+                    <div class="gauge-container">
+                        <svg class="gauge-svg" viewBox="0 0 120 120">
+                            <circle class="bg" cx="60" cy="60" r="50"/>
+                            <circle class="progress" id="cpu-gauge" cx="60" cy="60" r="50"/>
+                        </svg>
+                        <div class="gauge-value" id="cpu-value">1.2%</div>
+                        <div class="gauge-label">CPU Usage</div>
+                    </div>
+                    <div class="gauge-container">
+                        <svg class="gauge-svg" viewBox="0 0 120 120">
+                            <circle class="bg" cx="60" cy="60" r="50"/>
+                            <circle class="progress" id="ram-gauge" cx="60" cy="60" r="50"/>
+                        </svg>
+                        <div class="gauge-value" id="ram-value">14.8MB</div>
+                        <div class="gauge-label">RAM Allocated</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Taxonomies & Security Codes Distribution -->
+            <div class="glass-card taxonomy-card">
+                <h3>Top Log Event Categories</h3>
+                <div class="taxonomy-list" id="taxonomy-breakdown">
+                    <div class="taxonomy-item">
+                        <span class="code">LL01</span>
+                        <span class="name">Successful Login</span>
+                        <div class="bar-track"><div class="bar-fill" style="width: 0%"></div></div>
+                        <span class="count">0</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Live Terminal Stream Control Panel -->
+        <main class="console-section glass-card">
+            <div class="console-header">
+                <div class="console-title">
+                    <span class="live-dot"></span>
+                    <h2>Normalized OTel Log Stream</h2>
+                </div>
+                <div class="console-controls">
+                    <input type="text" id="search-input" placeholder="Search logs, IDs, codes..." class="glass-input">
+                    
+                    <select id="source-filter" class="glass-select">
+                        <option value="all">All Platforms</option>
+                        <option value="zos">z/OS Mainframe</option>
+                        <option value="ibm_i">IBM i (AS/400)</option>
+                        <option value="nonstop">HPE NonStop</option>
+                    </select>
+
+                    <select id="code-filter" class="glass-select">
+                        <option value="all">All Events</option>
+                        <option value="LL">Authentication (LL)</option>
+                        <option value="CC">Configuration (CC)</option>
+                        <option value="PA">Privileges (PA)</option>
+                        <option value="SA">Administration (SA)</option>
+                        <option value="SS">System/Apps (SS)</option>
+                        <option value="CM">Performance (CM)</option>
+                    </select>
+
+                    <button id="pause-btn" class="glass-btn primary">Pause Stream</button>
+                    <button id="clear-btn" class="glass-btn secondary">Clear console</button>
+                </div>
+            </div>
+
+            <!-- Terminal Log Console -->
+            <div class="terminal-wrapper">
+                <div class="terminal-body" id="log-terminal">
+                    <!-- Logs injected dynamically here -->
+                    <div class="terminal-placeholder">
+                        <div class="spinner"></div>
+                        <p>Establishing SSE telemetry channel...</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Log Record Structured Inspector Detail Drawer (Slide out overlay) -->
+    <div class="inspector-drawer" id="inspector-drawer">
+        <div class="drawer-header">
+            <h3>OpenTelemetry JSON Inspector</h3>
+            <button class="close-btn" id="close-inspector-btn">&times;</button>
+        </div>
+        <div class="drawer-body">
+            <div class="drawer-meta">
+                <div class="meta-row">
+                    <span class="label">Taxonomy Event:</span>
+                    <span class="val code-badge" id="insp-code">LL01</span>
+                </div>
+                <div class="meta-row">
+                    <span class="label">Description:</span>
+                    <span class="val" id="insp-desc">Successful login</span>
+                </div>
+                <div class="meta-row">
+                    <span class="label">Platform Source:</span>
+                    <span class="val" id="insp-platform">z/OS Mainframe</span>
+                </div>
+                <div class="meta-row">
+                    <span class="label">Severity:</span>
+                    <span class="val badge-sev" id="insp-severity">INFO</span>
+                </div>
+            </div>
+            <div class="json-code-wrapper">
+                <pre><code id="json-code" class="language-json">{}</code></pre>
+            </div>
+        </div>
+    </div>
+    
+    <div class="drawer-overlay" id="drawer-overlay"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

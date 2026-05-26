@@ -1,0 +1,83 @@
+# LegacyTel Agent Production Configuration
+
+agent:
+  id: "legacytel-hq-01"
+  name: "mainframe-observability-forwarder"
+  environment: "production"
+  region: "us-east-1"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  enable_dashboard: true
+
+receivers:
+  zos_smf:
+    enabled: true
+    bind_address: "0.0.0.0"
+    port: 5080
+    format: "binary" # binary (raw SMF) or tcp-syslog
+    charset: "ebcdic"
+    # Encryption in transit configuration
+    tls_enabled: false
+    cert_file: "/etc/legacytel/certs/zos_server.crt"
+    key_file: "/etc/legacytel/certs/zos_server.key"
+    client_ca_file: "/etc/legacytel/certs/mainframe_ca.crt" # Set to enable mutual TLS (mTLS)
+  
+  as400_qaudjrn:
+    enabled: true
+    bind_address: "0.0.0.0"
+    port: 5081
+    format: "type5" # DB2 or TCP stream type5
+    charset: "ebcdic"
+    # Encryption in transit configuration
+    tls_enabled: false
+    cert_file: "/etc/legacytel/certs/as400_server.crt"
+    key_file: "/etc/legacytel/certs/as400_server.key"
+    client_ca_file: "/etc/legacytel/certs/iseries_ca.crt" # Set to enable mutual TLS (mTLS)
+  
+  tandem_ems:
+    enabled: true
+    bind_address: "0.0.0.0"
+    port: 5082
+    format: "ems-binary" # binary or text
+    charset: "ascii"
+    # Encryption in transit configuration
+    tls_enabled: false
+    cert_file: "/etc/legacytel/certs/ems_server.crt"
+    key_file: "/etc/legacytel/certs/ems_server.key"
+    client_ca_file: "/etc/legacytel/certs/nonstop_ca.crt" # Set to enable mutual TLS (mTLS)"
+
+exporters:
+  otlp_http:
+    enabled: true
+    endpoint: "http://localhost:4318/v1/logs"
+    timeout_ms: 5000
+    headers:
+      Authorization: "Bearer otel-secret-token"
+
+  syslog:
+    enabled: true
+    network: "tcp" # tcp or udp
+    endpoint: "localhost:514" # Target port for your generic SIEM (Sentinel, Elastic, QRadar, etc.)
+    format: "cef" # cef (Common Event Format), leef (Log Event Extended Format), or rfc5424 (Standard Syslog)
+
+  splunk_hec:
+    enabled: false # Disabled by default to focus on open OTLP & CEF/LEEF standards
+    endpoint: "http://localhost:8088/services/collector"
+    token: "splunk-hec-token-1234-5678"
+    index: "mainframe_security"
+    source: "legacytel"
+    sourcetype: "_json"
+    tls:
+      insecure_skip_verify: true
+
+processors:
+  batch:
+    max_queue_size: 10000
+    timeout_ms: 1000
+    send_batch_size: 512
+  
+  taxonomy_mapping:
+    override_severity: true
+    default_index: "mainframe_security"

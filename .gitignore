@@ -1,0 +1,28 @@
+# Binaries
+bin/
+legacytel
+legacytel-zos
+legacytel-iseries
+legacytel-tandem
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Local Configuration Overrides
+*.local.yaml
+*.local.json
+
+# Local Certificates and Private Keys (Strictly keep out of source control)
+**/certs/*.key
+**/certs/*.pem
+**/certs/*.p12
+**/certs/*.crt
+**/certs/*.srl
+**/certs/*.cnf
+certs/
+
+# Log Files and History Databases
+logs/
+*.log
+*.sqlite
