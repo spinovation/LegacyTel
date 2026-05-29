@@ -4,6 +4,8 @@ legacytel
 legacytel-zos
 legacytel-iseries
 legacytel-tandem
+legacytel-*
+v2/legacytel-*
 *.exe
 *.dll
 *.so
