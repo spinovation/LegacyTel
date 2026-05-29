@@ -14,6 +14,7 @@ import (
 type AgentNode struct {
 	ID                 string                 `json:"id"`
 	Hostname           string                 `json:"hostname"`
+	IP                 string                 `json:"ip"`
 	OS                 string                 `json:"os"`
 	Version            string                 `json:"version"`
 	HypervisorType     string                 `json:"hypervisor_type"`
@@ -23,16 +24,27 @@ type AgentNode struct {
 	MemoryUsage        float64                `json:"memory_usage"`
 	Throughput         float64                `json:"throughput"`
 	LastHeartbeat      time.Time              `json:"last_heartbeat"`
-	Status             string                 `json:"status"` // "ACTIVE", "INACTIVE", "UPGRADING"
+	Status             string                 `json:"status"` // "ACTIVE", "INACTIVE", "UPGRADING", "ROLLBACK"
 	TargetPolicyVersion int                    `json:"target_policy_version"`
 	CurrentPolicyVersion int                   `json:"current_policy_version"`
 	PendingUpgrade     string                 `json:"pending_upgrade"` // Target version if upgrading
+}
+
+// AgentBinary represents a stored package in the Central Repository
+type AgentBinary struct {
+	Version    string    `json:"version"`
+	OS         string    `json:"os"`
+	Arch       string    `json:"arch"`
+	Channel    string    `json:"channel"` // "stable" (N), "previous" (N-1), "beta" (Beta)
+	UploadTime time.Time `json:"upload_time"`
+	Checksum   string    `json:"checksum"`
 }
 
 // FleetDatabase holds the in-memory state of the registered nodes
 type FleetDatabase struct {
 	mu           sync.RWMutex
 	Nodes        map[string]*AgentNode
+	Binaries     map[string][]*AgentBinary // Key: "os/arch" -> List of versions
 	ClientChans  map[chan string]bool
 	PolicyConfig string
 	PolicyVer    int
@@ -40,6 +52,7 @@ type FleetDatabase struct {
 
 var db = &FleetDatabase{
 	Nodes:       make(map[string]*AgentNode),
+	Binaries:    make(map[string][]*AgentBinary),
 	ClientChans: make(map[chan string]bool),
 	PolicyVer:   1,
 	PolicyConfig: `receivers:
@@ -54,6 +67,9 @@ exporters:
 }
 
 func main() {
+	// Initialize default binary repository packages (N, N-1, Beta) for verification
+	initDefaultBinaryRepository()
+
 	// Root route serving the fleet management dashboard
 	http.HandleFunc("/", handleDashboard)
 	
@@ -64,7 +80,9 @@ func main() {
 	
 	// API Endpoints for UI / Admin Console control
 	http.HandleFunc("/api/v1/admin/upgrade", handleAdminUpgrade)
+	http.HandleFunc("/api/v1/admin/upgrade-all", handleAdminUpgradeAll)
 	http.HandleFunc("/api/v1/admin/policy/update", handleAdminPolicyUpdate)
+	http.HandleFunc("/api/v1/admin/binaries", handleAdminBinaries)
 	http.HandleFunc("/api/v1/stream", handleSSEStream)
 
 	// Mock database generator for direct evaluation/demo purposes
@@ -75,6 +93,21 @@ func main() {
 	log.Printf("[CONTROL PLANE] Access the central dashboard: http://localhost:9090")
 	if err := http.ListenAndServe(serverAddr, nil); err != nil {
 		log.Fatalf("Control Plane server failed: %v", err)
+	}
+}
+
+func initDefaultBinaryRepository() {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	platforms := []string{"linux", "windows", "darwin"}
+	for _, osName := range platforms {
+		key := osName + "/amd64"
+		db.Binaries[key] = []*AgentBinary{
+			{Version: "v2.0.0", OS: osName, Arch: "amd64", Channel: "stable", UploadTime: time.Now().Add(-48 * time.Hour), Checksum: "sha256-a1b2c3d4"},
+			{Version: "v1.9.8", OS: osName, Arch: "amd64", Channel: "previous", UploadTime: time.Now().Add(-240 * time.Hour), Checksum: "sha256-e5f6g7h8"},
+			{Version: "v2.1.0-beta", OS: osName, Arch: "amd64", Channel: "beta", UploadTime: time.Now().Add(-2 * time.Hour), Checksum: "sha256-i9j0k1l2"},
+		}
 	}
 }
 
@@ -141,7 +174,6 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		node.CurrentPolicyVersion = update.CurrentPolicyVersion
 	} else {
-		// Auto-register if not seen before
 		update.LastHeartbeat = time.Now()
 		update.Status = "ACTIVE"
 		update.TargetPolicyVersion = db.PolicyVer
@@ -150,7 +182,6 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	db.mu.Unlock()
 
-	// Prepare response actions (e.g. pending updates, policy changes)
 	db.mu.RLock()
 	resp := map[string]interface{}{
 		"status":            "OK",
@@ -179,7 +210,7 @@ func handlePolicy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAdminUpgrade triggers a scheduled upgrade command
+// handleAdminUpgrade triggers a scheduled upgrade command for a selective host
 func handleAdminUpgrade(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -214,6 +245,100 @@ func handleAdminUpgrade(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "UPGRADE_SCHEDULED"})
+}
+
+// handleAdminUpgradeAll triggers an upgrade for all hosts in the fleet
+func handleAdminUpgradeAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TargetVersion string `json:"target_version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	db.mu.Lock()
+	count := 0
+	for _, node := range db.Nodes {
+		node.PendingUpgrade = req.TargetVersion
+		node.Status = "UPGRADING"
+		count++
+	}
+	db.mu.Unlock()
+
+	log.Printf("[ADMIN] Orchestrated bulk upgrade for %d nodes to version '%s'", count, req.TargetVersion)
+	broadcastUpdate(fmt.Sprintf("Scheduled bulk upgrade of all %d nodes to %s", count, req.TargetVersion))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "BULK_UPGRADE_SCHEDULED",
+		"count":  count,
+	})
+}
+
+// handleAdminBinaries handles package uploads, duplicate checking, and listing versions
+func handleAdminBinaries(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		db.mu.RLock()
+		defer db.mu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(db.Binaries)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var req AgentBinary
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		key := req.OS + "/" + req.Arch
+		db.mu.Lock()
+		list, exists := db.Binaries[key]
+		if !exists {
+			list = []*AgentBinary{}
+		}
+
+		// Duplicate check
+		duplicate := false
+		for _, b := range list {
+			if b.Version == req.Version {
+				duplicate = true
+				break
+			}
+		}
+
+		if duplicate {
+			db.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"status": "DUPLICATE_VERSION", "message": "Binary version already exists."})
+			return
+		}
+
+		// Save uploaded version (limit and shift channel pointers if necessary to keep 3 versions)
+		req.UploadTime = time.Now()
+		req.Checksum = fmt.Sprintf("sha256-u%dp%d", time.Now().Second(), time.Now().Nanosecond()%1000)
+		db.Binaries[key] = append(db.Binaries[key], &req)
+		db.mu.Unlock()
+
+		log.Printf("[REPOSITORY] Uploaded new package version '%s' for platform '%s/%s'", req.Version, req.OS, req.Arch)
+		broadcastUpdate(fmt.Sprintf("New agent binary %s uploaded for %s/%s in Channel: %s", req.Version, req.OS, req.Arch, req.Channel))
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"status": "UPLOAD_SUCCESS"})
+		return
+	}
+
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
 // handleAdminPolicyUpdate updates the global policy config
@@ -274,7 +399,8 @@ func handleSSEStream(w http.ResponseWriter, r *http.Request) {
 	// Send initial database dump to UI
 	db.mu.RLock()
 	nodesJSON, _ := json.Marshal(db.Nodes)
-	fmt.Fprintf(w, "event: init\ndata: %s\n\n", string(nodesJSON))
+	binariesJSON, _ := json.Marshal(db.Binaries)
+	fmt.Fprintf(w, "event: init\ndata: {\"nodes\":%s, \"binaries\":%s}\n\n", string(nodesJSON), string(binariesJSON))
 	flusher.Flush()
 	db.mu.RUnlock()
 
@@ -286,8 +412,9 @@ func handleSSEStream(w http.ResponseWriter, r *http.Request) {
 		case msg := <-ch:
 			db.mu.RLock()
 			nodesJSON, _ := json.Marshal(db.Nodes)
+			binariesJSON, _ := json.Marshal(db.Binaries)
 			db.mu.RUnlock()
-			fmt.Fprintf(w, "event: update\ndata: {\"log\":\"%s\", \"nodes\":%s}\n\n", msg, string(nodesJSON))
+			fmt.Fprintf(w, "event: update\ndata: {\"log\":\"%s\", \"nodes\":%s, \"binaries\":%s}\n\n", msg, string(nodesJSON), string(binariesJSON))
 			flusher.Flush()
 		}
 	}
@@ -317,11 +444,11 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 // runMockHeartbeatSimulator populates the UI with simulated nodes for direct evaluation
 func runMockHeartbeatSimulator() {
-	// Add mock node instances
 	db.mu.Lock()
 	db.Nodes["node-linux-web"] = &AgentNode{
 		ID:                  "node-linux-web",
 		Hostname:            "prod-linux-nginx-01",
+		IP:                  "10.0.10.15",
 		OS:                  "linux",
 		Version:             "v1.9.8",
 		HypervisorType:      "type-1",
@@ -339,6 +466,7 @@ func runMockHeartbeatSimulator() {
 	db.Nodes["node-win-ad"] = &AgentNode{
 		ID:                  "node-win-ad",
 		Hostname:            "corp-win-ad-02",
+		IP:                  "10.0.20.44",
 		OS:                  "windows",
 		Version:             "v1.9.8",
 		HypervisorType:      "type-1",
@@ -356,6 +484,7 @@ func runMockHeartbeatSimulator() {
 	db.Nodes["node-mac-dev"] = &AgentNode{
 		ID:                  "node-mac-dev",
 		Hostname:            "dev-macbook-gs",
+		IP:                  "192.168.1.108",
 		OS:                  "darwin",
 		Version:             "v2.0.0",
 		HypervisorType:      "type-2",
@@ -501,7 +630,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
         main {
             display: grid;
-            grid-template-columns: 2fr 1fr;
+            grid-template-columns: 2fr 1.2fr;
             gap: 30px;
         }
 
@@ -513,6 +642,7 @@ const dashboardHTML = `<!DOCTYPE html>
             border-radius: 20px;
             padding: 25px;
             box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            margin-bottom: 30px;
         }
 
         .panel-title {
@@ -524,6 +654,24 @@ const dashboardHTML = `<!DOCTYPE html>
             align-items: center;
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
             padding-bottom: 12px;
+        }
+
+        .topology-container {
+            width: 100%;
+            height: 380px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .topology-svg {
+            width: 100%;
+            height: 100%;
         }
 
         .node-grid {
@@ -687,7 +835,7 @@ const dashboardHTML = `<!DOCTYPE html>
             padding: 15px;
             font-family: 'JetBrains Mono', monospace;
             font-size: 12px;
-            height: 250px;
+            height: 200px;
             overflow-y: auto;
             color: var(--accent-teal);
         }
@@ -715,6 +863,36 @@ const dashboardHTML = `<!DOCTYPE html>
             color: var(--text-muted);
             font-family: 'JetBrains Mono', monospace;
         }
+
+        .repo-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 12px;
+        }
+
+        .repo-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        }
+
+        .repo-row span.channel {
+            text-transform: uppercase;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 700;
+        }
+
+        .channel.stable { background: rgba(74, 222, 128, 0.15); color: var(--accent-green); }
+        .channel.previous { background: rgba(148, 163, 184, 0.15); color: var(--text-muted); }
+        .channel.beta { background: rgba(255, 183, 3, 0.15); color: var(--accent-gold); }
 
         /* Modal styling */
         .modal {
@@ -766,6 +944,32 @@ const dashboardHTML = `<!DOCTYPE html>
             justify-content: flex-end;
             gap: 10px;
         }
+
+        .input-group {
+            margin-bottom: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .input-group label {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .input-group input, .input-group select {
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 10px;
+            border-radius: 8px;
+            color: #fff;
+            font-family: inherit;
+        }
+
+        .flex-row {
+            display: flex;
+            gap: 15px;
+        }
     </style>
 </head>
 <body>
@@ -783,17 +987,45 @@ const dashboardHTML = `<!DOCTYPE html>
     </header>
 
     <main>
-        <div class="panel">
-            <div class="panel-title">
-                <span>🖥️ Registered Agent Fleet</span>
-                <button onclick="openPolicyModal()">⚙️ Global Policy Manager</button>
+        <div>
+            <!-- Hub & Spoke Topology Visualizer -->
+            <div class="panel">
+                <div class="panel-title">
+                    <span>🕸️ Fleet Network Topology Map</span>
+                    <button class="btn-sec" onclick="triggerBulkUpgrade()">🚀 Bulk Upgrade All Hosts</button>
+                </div>
+                <div class="topology-container">
+                    <svg class="topology-svg" id="topology-map">
+                        <!-- Dynamic Hub & Spokes rendered inside script -->
+                    </svg>
+                </div>
             </div>
-            <div class="node-grid" id="node-container">
-                <!-- Nodes dynamically injected here -->
+
+            <!-- Agent Grid -->
+            <div class="panel">
+                <div class="panel-title">
+                    <span>🖥️ Registered Agent Fleet</span>
+                    <button onclick="openPolicyModal()">⚙️ Global Policy Manager</button>
+                </div>
+                <div class="node-grid" id="node-container">
+                    <!-- Nodes dynamically injected here -->
+                </div>
             </div>
         </div>
 
         <div style="display: flex; flex-direction: column; gap: 30px;">
+            <!-- Upload & Package Repository -->
+            <div class="panel">
+                <div class="panel-title">
+                    <span>📦 Central Binary Repository</span>
+                    <button onclick="openUploadModal()">➕ Upload New Package</button>
+                </div>
+                <div id="repo-container">
+                    <!-- Binaries (N, n-1, Beta) rendered here -->
+                </div>
+            </div>
+
+            <!-- Real-time Terminal Log -->
             <div class="panel">
                 <div class="panel-title">📡 Real-Time Central Event Stream</div>
                 <div class="console-log" id="console-stream">
@@ -801,10 +1033,11 @@ const dashboardHTML = `<!DOCTYPE html>
                 </div>
             </div>
 
+            <!-- Drill-down Inspector Drawer -->
             <div class="panel">
                 <div class="panel-title">📁 Scanned Application Registry</div>
                 <div id="central-inventory" style="color: var(--text-muted); font-size: 14px;">
-                    Select a node to inspect system packages and inventory context.
+                    Select a host spoke node on the map to inspect software package inventory and server parameters.
                 </div>
             </div>
         </div>
@@ -830,20 +1063,69 @@ exporters:
         </div>
     </div>
 
+    <!-- Binary Package Upload Modal -->
+    <div class="modal" id="upload-modal">
+        <div class="modal-content">
+            <div class="modal-header">Upload Latest Agent Binary Package</div>
+            <div class="flex-row">
+                <div class="input-group" style="flex: 1;">
+                    <label>Target OS</label>
+                    <select id="upload-os">
+                        <option value="linux">Linux</option>
+                        <option value="windows">Windows</option>
+                        <option value="darwin">macOS (Darwin)</option>
+                    </select>
+                </div>
+                <div class="input-group" style="flex: 1;">
+                    <label>Architecture</label>
+                    <select id="upload-arch">
+                        <option value="amd64">x86_64 (amd64)</option>
+                        <option value="arm64">Apple Silicon / ARM (arm64)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="flex-row">
+                <div class="input-group" style="flex: 1;">
+                    <label>Package Version</label>
+                    <input type="text" id="upload-version" placeholder="e.g. v2.0.2">
+                </div>
+                <div class="input-group" style="flex: 1;">
+                    <label>Upgrade Channel</label>
+                    <select id="upload-channel">
+                        <option value="stable">N (Latest Stable)</option>
+                        <option value="previous">N-1 (Previous Stable)</option>
+                        <option value="beta">Beta (Testing Branch)</option>
+                    </select>
+                </div>
+            </div>
+            <div style="color: var(--accent-orange); font-size: 12px; margin-bottom: 15px;" id="upload-error"></div>
+            <div class="modal-footer">
+                <button class="btn-sec" onclick="closeUploadModal()">Cancel</button>
+                <button onclick="submitPackageUpload()">Verify & Upload Binary</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let nodesData = {};
+        let repoData = {};
 
         // Establish real-time SSE link with Control Plane
         const source = new EventSource('/api/v1/stream');
 
         source.addEventListener('init', function(e) {
-            nodesData = JSON.parse(e.data);
+            const data = JSON.parse(e.data);
+            nodesData = data.nodes;
+            repoData = data.binaries;
             renderNodes();
+            renderRepository();
+            renderTopologyMap();
         });
 
         source.addEventListener('update', function(e) {
             const payload = JSON.parse(e.data);
             nodesData = payload.nodes;
+            repoData = payload.binaries;
             
             // Ingest log stream
             const stream = document.getElementById('console-stream');
@@ -854,6 +1136,8 @@ exporters:
             stream.scrollTop = stream.scrollHeight;
 
             renderNodes();
+            renderRepository();
+            renderTopologyMap();
         });
 
         function renderNodes() {
@@ -870,16 +1154,19 @@ exporters:
                 const card = document.createElement('div');
                 card.className = 'node-card ' + (node.status === 'UPGRADING' ? 'upgrading' : '');
                 
-                // Hypervisor classification styling
                 const isType1 = node.hypervisor_type === 'type-1';
                 const hvClass = isType1 ? 'type-1' : 'type-2';
                 const hvLabel = isType1 ? 'Type 1 (Bare-Metal)' : 'Type 2 (Hosted)';
 
-                // Render inventory tags
-                let inventoryHTML = '';
-                node.app_inventory.forEach(app => {
-                    inventoryHTML += '<span class="inventory-tag">' + app + '</span>';
-                });
+                // Render matching update selections based on OS platform
+                const osKey = node.os + '/amd64';
+                let selectOptions = '';
+                if (repoData[osKey]) {
+                    repoData[osKey].forEach(binary => {
+                        const channelLabel = binary.channel === 'stable' ? 'N' : (binary.channel === 'previous' ? 'N-1' : 'Beta');
+                        selectOptions += '<option value="' + binary.version + '">' + binary.version + ' (' + channelLabel + ')</option>';
+                    });
+                }
 
                 card.innerHTML = 
                     '<div class="node-header">' +
@@ -888,10 +1175,11 @@ exporters:
                                 '<span>' + node.hostname + '</span>' +
                                 '<span class="node-os">' + node.os + '</span>' +
                             '</div>' +
-                            '<div style="font-size: 12px; color: var(--text-muted);">ID: ' + node.id + '</div>' +
+                            '<div style="font-size: 12px; color: var(--text-muted);">IP Address: <strong>' + node.IP + '</strong></div>' +
                         '</div>' +
                         '<span class="node-ver">' + node.version + '</span>' +
                     '</div>' +
+
                     '<div class="node-metrics">' +
                         '<div class="metric-item">' +
                             '<div class="metric-lbl">CPU Usage</div>' +
@@ -910,11 +1198,11 @@ exporters:
                         '<span class="hypervisor-tag ' + hvClass + '">' +
                             '🛡️ ' + node.hypervisor_name + ' [' + hvLabel + ']' +
                         '</span>' +
-                        '<div class="card-actions">' +
-                            '<button class="btn-sec" onclick="inspectInventory(\'' + node.id + '\')">Inspect Apps</button>' +
-                            '<button onclick="triggerUpgrade(\'' + node.id + '\')" ' + (node.status === 'UPGRADING' ? 'disabled' : '') + '>' +
-                                (node.status === 'UPGRADING' ? 'Upgrading...' : 'Upgrade Agent') +
-                            '</button>' +
+                        '<div class="card-actions" style="align-items: center; gap: 8px;">' +
+                            '<select id="select-' + node.id + '" style="background: rgba(0,0,0,0.3); color:#fff; border:1px solid rgba(255,255,255,0.15); padding: 4px; border-radius: 6px; font-size:11px;">' +
+                                selectOptions +
+                            '</select>' +
+                            '<button onclick="triggerUpgrade(\'' + node.id + '\')">Upgrade</button>' +
                         '</div>' +
                     '</div>';
                 container.appendChild(card);
@@ -924,15 +1212,107 @@ exporters:
             document.getElementById('stat-upgrading').textContent = upgradingCount;
         }
 
+        function renderRepository() {
+            const container = document.getElementById('repo-container');
+            container.innerHTML = '';
+
+            Object.keys(repoData).forEach(platformKey => {
+                const card = document.createElement('div');
+                card.className = 'repo-card';
+                card.innerHTML = '<div style="font-weight: 700; font-size:14px; margin-bottom:10px; color:var(--accent-teal);">🖥️ ' + platformKey.toUpperCase() + '</div>';
+
+                repoData[platformKey].forEach(binary => {
+                    const chClass = binary.channel === 'stable' ? 'stable' : (binary.channel === 'previous' ? 'previous' : 'beta');
+                    const chLabel = binary.channel === 'stable' ? 'N (Latest)' : (binary.channel === 'previous' ? 'N-1 (Stable)' : 'Beta (Testing)');
+
+                    card.innerHTML += 
+                        '<div class="repo-row">' +
+                            '<span><strong>' + binary.version + '</strong></span>' +
+                            '<span class="channel ' + chClass + '">' + chLabel + '</span>' +
+                        '</div>';
+                });
+                container.appendChild(card);
+            });
+        }
+
+        function renderTopologyMap() {
+            const svg = document.getElementById('topology-map');
+            svg.innerHTML = ''; // Reset
+
+            const cx = 250;
+            const cy = 190;
+            const nodes = Object.values(nodesData);
+            const radius = 120;
+
+            // 1. Draw central Hub node (Control Plane)
+            const hubGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            hubGroup.innerHTML = 
+                '<circle cx="' + cx + '" cy="' + cy + '" r="35" fill="rgba(0, 242, 254, 0.15)" stroke="var(--accent-teal)" stroke-width="2" style="filter: drop-shadow(0 0 10px rgba(0, 242, 254, 0.4));" />' +
+                '<text x="' + cx + '" y="' + (cy + 4) + '" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">CENTRAL</text>';
+            
+            // 2. Draw Spokes and Node connections dynamically
+            nodes.forEach((node, idx) => {
+                const angle = (idx * 2 * Math.PI) / nodes.length;
+                const nx = cx + radius * Math.cos(angle);
+                const ny = cy + radius * Math.sin(angle);
+
+                // Draw connecting spoke line
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                line.setAttribute('x1', cx);
+                line.setAttribute('y1', cy);
+                line.setAttribute('x2', nx);
+                line.setAttribute('y2', ny);
+                line.setAttribute('stroke', node.status === 'UPGRADING' ? 'var(--accent-gold)' : 'rgba(255,255,255,0.15)');
+                line.setAttribute('stroke-width', '2');
+                if (node.status === 'UPGRADING') {
+                    line.setAttribute('stroke-dasharray', '5,5');
+                    line.innerHTML = '<animate attributeName="stroke-dashoffset" values="50;0" dur="2s" repeatCount="indefinite" />';
+                }
+                svg.appendChild(line);
+
+                // Draw Spoke server node
+                const nodeG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                nodeG.setAttribute('style', 'cursor: pointer;');
+                nodeG.setAttribute('onclick', 'inspectInventory("' + node.id + '")');
+
+                const circleColor = node.os === 'linux' ? 'var(--accent-teal)' : (node.os === 'windows' ? 'var(--accent-gold)' : 'var(--accent-orange)');
+                const statusPulse = node.status === 'UPGRADING' ? 'rgba(255, 183, 3, 0.3)' : 'rgba(255,255,255,0.05)';
+
+                nodeG.innerHTML = 
+                    '<circle cx="' + nx + '" cy="' + ny + '" r="25" fill="' + statusPulse + '" stroke="' + circleColor + '" stroke-width="2" />' +
+                    '<text x="' + nx + '" y="' + (ny - 30) + '" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">' + node.hostname + '</text>' +
+                    '<text x="' + nx + '" y="' + (ny + 4) + '" fill="var(--text-muted)" font-size="10" font-weight="700" text-anchor="middle">' + node.os.toUpperCase() + '</text>' +
+                    '<text x="' + nx + '" y="' + (ny + 30) + '" fill="var(--accent-teal)" font-size="9" text-anchor="middle">' + node.IP + '</text>';
+
+                svg.appendChild(nodeG);
+            });
+
+            svg.appendChild(hubGroup);
+        }
+
         function triggerUpgrade(nodeId) {
+            const version = document.getElementById('select-' + nodeId).value;
             fetch('/api/v1/admin/upgrade', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ node_id: nodeId, target_version: "v2.0.1-LTS" })
+                body: JSON.stringify({ node_id: nodeId, target_version: version })
             })
             .then(res => res.json())
             .then(data => {
                 console.log("Upgrade scheduled:", data);
+            });
+        }
+
+        function triggerBulkUpgrade() {
+            // Find stable latest version to deploy
+            fetch('/api/v1/admin/upgrade-all', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_version: "v2.0.1-LTS" })
+            })
+            .then(res => res.json())
+            .then(data => {
+                console.log("Bulk upgrade scheduled:", data);
             });
         }
 
@@ -947,10 +1327,54 @@ exporters:
             });
 
             div.innerHTML = 
-                '<div style="font-weight: 700; color: #fff; margin-bottom: 8px;">Host: ' + node.hostname + '</div>' +
+                '<div style="font-weight: 700; color: #fff; margin-bottom: 8px;">Host: ' + node.hostname + ' (' + node.IP + ')</div>' +
                 '<div style="margin-bottom: 12px; font-size: 13px;">Classified Hypervisor: <strong style="color: var(--accent-gold);">' + node.hypervisor_name + '</strong></div>' +
+                '<div style="margin-bottom: 12px; font-size: 13px;">Agent Active Version: <strong style="color: var(--accent-teal);">' + node.version + '</strong></div>' +
                 '<div style="font-weight: 600; color: #fff; margin-bottom: 6px; font-size: 13px;">Scanned Application Inventory:</div>' +
                 '<div class="inventory-list">' + tagsHTML + '</div>';
+        }
+
+        function openUploadModal() {
+            document.getElementById('upload-error').textContent = '';
+            document.getElementById('upload-modal').style.display = 'flex';
+        }
+
+        function closeUploadModal() {
+            document.getElementById('upload-modal').style.display = 'none';
+        }
+
+        function submitPackageUpload() {
+            const osName = document.getElementById('upload-os').value;
+            const arch = document.getElementById('upload-arch').value;
+            const version = document.getElementById('upload-version').value;
+            const channel = document.getElementById('upload-channel').value;
+
+            if (!version) {
+                document.getElementById('upload-error').textContent = 'Please enter a valid version.';
+                return;
+            }
+
+            fetch('/api/v1/admin/binaries', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ version: version, os: osName, arch: arch, channel: channel })
+            })
+            .then(res => {
+                if (res.status === 409) {
+                    throw new Error('DUPLICATE_VERSION');
+                }
+                return res.json();
+            })
+            .then(data => {
+                closeUploadModal();
+            })
+            .catch(err => {
+                if (err.message === 'DUPLICATE_VERSION') {
+                    document.getElementById('upload-error').textContent = 'Error: A package with this version already exists for this architecture!';
+                } else {
+                    document.getElementById('upload-error').textContent = 'Error uploading package details.';
+                }
+            });
         }
 
         function openPolicyModal() {
